@@ -1,56 +1,104 @@
 from __future__ import annotations
 
-import argparse
-import json
-import sys
+import os
 from pathlib import Path
+from typing import Optional
 
-from .config import Config
+import typer
+
+from .config import Config, ConfigError, LAYOUTS, load_dotenv, log
+
+app = typer.Typer(add_completion=False, no_args_is_help=True,
+                  help="ClipForge: stream/VOD -> YouTube Shorts. Review the clips, then post them yourself.")
 
 
-def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(prog="clipforge", description="Stream/VOD -> YouTube Shorts")
-    sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("doctor", help="check ffmpeg, yt-dlp, GPU and Python dependencies")
+def _cfg(ctx: typer.Context) -> Config:
+    try:
+        return Config.load(ctx.obj["config"])
+    except ConfigError as e:
+        log(f"config error: {e}", "red")
+        raise typer.Exit(2)
 
-    r = sub.add_parser("run", help="process a URL or local video file")
-    r.add_argument("source", help="YouTube stream/VOD URL or a local video path")
-    r.add_argument("-o", "--out", default="clipforge_out")
-    r.add_argument("-n", "--clips", type=int, default=8)
-    r.add_argument("--min-dur", type=float, default=20)
-    r.add_argument("--max-dur", type=float, default=55)
-    r.add_argument("--whisper-model", default="auto", help="auto, large-v3, medium, small ...")
-    r.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
-    r.add_argument("--language", default=None, help="e.g. en; default auto-detect")
-    r.add_argument("--layout", choices=["auto", "face", "split", "fit"], default="auto")
-    r.add_argument("--no-captions", action="store_true")
-    r.add_argument("--no-llm", action="store_true")
-    r.add_argument("--llm-model", default="claude-sonnet-5-5")
-    r.add_argument("--encoder", choices=["auto", "nvenc", "x264"], default="auto")
-    r.add_argument("--max-height", type=int, default=1080)
-    r.add_argument("--cookies-from-browser", default=None, metavar="BROWSER")
-    r.add_argument("--force", action="store_true", help="ignore cached transcript/audio")
 
-    v = sub.add_parser("review", help="rebuild review.html for a finished run directory")
-    v.add_argument("workdir")
+@app.callback()
+def main(ctx: typer.Context,
+         config: Path = typer.Option(Path("config.yaml"), "--config", "-c", help="Path to config.yaml")):
+    ctx.obj = {"config": config}
+    load_dotenv()
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        log("warning: ANTHROPIC_API_KEY is set. ClipForge never uses it; the claude CLI subprocess "
+            "runs without it so your subscription is used.", "yellow")
 
-    a = p.parse_args(argv)
-    if a.cmd == "doctor":
-        from .env import print_env
 
-        sys.exit(0 if print_env() else 1)
-    if a.cmd == "review":
-        from .review import write_review
+def _layout_opt(v: Optional[str]) -> Optional[str]:
+    if v is not None and v not in LAYOUTS:
+        raise typer.BadParameter(f"must be one of {', '.join(LAYOUTS)}")
+    return v
 
-        wd = Path(a.workdir)
-        print(write_review(wd, wd.name, json.loads((wd / "clips.json").read_text())))
-        return
 
-    cfg = Config(out_dir=Path(a.out), clips=a.clips, min_dur=a.min_dur, max_dur=a.max_dur,
-                 max_height=a.max_height, whisper_model=a.whisper_model, device=a.device,
-                 language=a.language, layout=a.layout, captions=not a.no_captions,
-                 use_llm=not a.no_llm, llm_model=a.llm_model, encoder=a.encoder,
-                 cookies_from_browser=a.cookies_from_browser, force=a.force)
-    from .pipeline import run
+def _guard(fn):
+    from .ingest import Refused
 
-    run(a.source, cfg)
+    try:
+        return fn()
+    except Refused as e:
+        log(str(e), "red")
+        raise typer.Exit(3)
+    except FileNotFoundError as e:
+        log(str(e), "red")
+        raise typer.Exit(4)
+
+
+@app.command()
+def run(ctx: typer.Context,
+        source: str = typer.Argument(..., metavar="URL", help="YouTube URL (or a local video file)"),
+        max_clips: Optional[int] = typer.Option(None, "--max-clips", min=1),
+        layout: Optional[str] = typer.Option(None, "--layout", help="split | center | blur_fill"),
+        dry_run: bool = typer.Option(False, "--dry-run", help="Stop after ranking; print timestamps"),
+        streamer: Optional[str] = typer.Option(None, "--streamer", help="Allowed channel (required for local files)")):
+    """Download, find, rank, cut and render the best moments of a VOD."""
+    from . import pipeline
+
+    cfg = _cfg(ctx)
+    if max_clips:
+        cfg.max_clips = max_clips
+    _guard(lambda: pipeline.run(source, cfg, layout_override=_layout_opt(layout), dry_run=dry_run,
+                                streamer=streamer))
+
+
+@app.command()
+def watch(ctx: typer.Context, once: bool = typer.Option(False, "--once", help="Poll once and exit")):
+    """Poll allowed channels' /streams pages and process new VODs."""
+    from . import pipeline
+
+    _guard(lambda: pipeline.watch(_cfg(ctx), once=once))
+
+
+@app.command()
+def calibrate(ctx: typer.Context, url: str = typer.Argument(..., metavar="URL"),
+              at: Optional[float] = typer.Option(None, "--at", help="Seconds into the VOD (default: 25%)")):
+    """Save one frame with a coordinate grid so you can read facecam x/y/w/h off it."""
+    from . import pipeline
+
+    _guard(lambda: pipeline.calibrate(url, _cfg(ctx), at))
+
+
+@app.command()
+def rerender(ctx: typer.Context, video_id: str = typer.Argument(...),
+             layout: Optional[str] = typer.Option(None, "--layout")):
+    """Re-render a processed VOD after changing config. No re-download, no re-ranking."""
+    from . import pipeline
+
+    _guard(lambda: pipeline.rerender(video_id, _cfg(ctx), _layout_opt(layout)))
+
+
+@app.command()
+def doctor():
+    """Check ffmpeg, yt-dlp, claude CLI, GPU/CUDA and Python dependencies."""
+    from .env import print_env
+
+    raise typer.Exit(0 if print_env() else 1)
+
+
+if __name__ == "__main__":
+    app()

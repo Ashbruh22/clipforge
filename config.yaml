@@ -1,0 +1,38 @@
+# ClipForge configuration. Only channels listed in allowed_channels are ever processed.
+allowed_channels:
+  - "@ExampleStreamer"
+
+streamers:
+  "@ExampleStreamer":
+    layout: split            # split | center | blur_fill
+    # Facecam rectangle in source pixels (use `clipforge calibrate <url>` to read it off a frame).
+    # ref_width is the frame width these numbers were measured on (default 1920).
+    facecam: {x: 1520, y: 40, w: 380, h: 214}
+    required_caption: "@ExampleStreamer #ExampleTag"
+
+ranker: claude_cli           # claude_cli | gemini (gemini reads GEMINI_API_KEY from .env)
+min_score: 7
+max_clips: 10
+
+# Signal weights for the per-second excitement score (missing signals are re-weighted away).
+signals: {chat: 0.45, audio: 0.35, speech: 0.15, scene: 0.05}
+chat_lag_seconds: 8          # chat reacts after the moment; shift it back by this much
+
+whisper_model: auto          # auto (by VRAM) | small | medium | large-v3 | distil-large-v3
+encoder: auto                # auto | nvenc | x264
+encode: {crf: 18, preset: slow, nvenc_cq: 19}
+
+# --- less common knobs (defaults shown) ---
+# layout: split              # default layout when a streamer doesn't set one
+# language: en
+# candidates: 40             # peaks sent to the ranker
+# window_s: 90
+# peak_min_gap_s: 60         # effective gap is max(this, window_s) so windows never overlap
+# rank_batch_size: 5
+# chat_window_s: 10
+# hype_bonus: 3.0
+# hype_tokens: [lmao, lol, w, omegalul, "😂", "💀", "clip it"]
+# profanity: {enabled: false, words: [], mask: "*"}
+# watch: {interval_minutes: 30, backfill: 1}
+# work_dir: work
+# output_dir: output

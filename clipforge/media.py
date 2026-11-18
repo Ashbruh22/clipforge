@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
@@ -30,29 +31,45 @@ def probe(path: Path) -> MediaInfo:
                      any(s["codec_type"] == "audio" for s in d["streams"]))
 
 
-def extract_audio(src: Path, wav: Path) -> None:
-    """16 kHz mono PCM, used for both Whisper and the energy analysis."""
-    subprocess.run(
-        ["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
-         "-c:a", "pcm_s16le", str(wav)],
-        check=True,
-    )
-
-
 @lru_cache(maxsize=None)
 def has_filter(name: str) -> bool:
     out = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True).stdout
-    return any(len(p) > 1 and p[1] == name for p in (line.split() for line in out.splitlines()))
+    return any(len(p) > 2 and p[1] == name for p in (line.split() for line in out.splitlines()))
 
 
 @lru_cache(maxsize=None)
 def nvenc_works() -> bool:
+    """`ffmpeg -encoders` lists h264_nvenc AND a real test encode succeeds."""
+    enc = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+    if "h264_nvenc" not in enc:
+        return False
     r = subprocess.run(
         ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.2",
-         "-c:v", "h264_nvenc", "-f", "null", "-"],
-        capture_output=True,
-    )
+         "-c:v", "h264_nvenc", "-f", "null", "-"], capture_output=True)
     return r.returncode == 0
+
+
+def resolve_encoder(pref: str) -> str:
+    if pref == "x264":
+        return "x264"
+    if nvenc_works():
+        return "nvenc"
+    if pref == "nvenc":
+        from .config import log
+        log("encoder: nvenc requested but not usable here, falling back to x264", "yellow")
+    return "x264"
+
+
+def vram_mib() -> int | None:
+    if not shutil.which("nvidia-smi"):
+        return None
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=20).stdout
+        return max(int(x) for x in out.split())
+    except Exception:
+        return None
 
 
 def cuda_available() -> bool:
@@ -62,10 +79,3 @@ def cuda_available() -> bool:
         return ctranslate2.get_cuda_device_count() > 0
     except Exception:
         return False
-
-
-def video_encoder_args(pref: str = "auto") -> list[str]:
-    if pref in ("auto", "nvenc") and nvenc_works():
-        return ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq", "19",
-                "-b:v", "0", "-spatial-aq", "1", "-profile:v", "high"]
-    return ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-profile:v", "high"]

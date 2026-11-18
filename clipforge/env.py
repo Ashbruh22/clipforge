@@ -10,45 +10,52 @@ import sys
 from . import media
 
 
-def _ver(cmd: list[str]) -> str | None:
+def _first_line(cmd: list[str]) -> str | None:
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
-        return out.splitlines()[0] if out else "ok"
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
+        return out.splitlines()[0] if out.strip() else "ok"
     except Exception:
         return None
 
 
-def check_env() -> list[tuple[str, bool, str]]:
-    rows: list[tuple[str, bool, str]] = []
-    rows.append(("OS", True, f"{platform.system()} {platform.release()}"))
-    rows.append(("Python", sys.version_info >= (3, 10), platform.python_version()))
+def check_env() -> list[tuple[str, bool, str, bool]]:
+    """(name, ok, detail, critical)"""
+    rows: list[tuple[str, bool, str, bool]] = []
+
+    def add(name, ok, detail="", critical=False):
+        rows.append((name, bool(ok), detail, critical))
+
+    add("OS", True, f"{platform.system()} {platform.release()}")
+    add("Python", sys.version_info >= (3, 11), platform.python_version(), True)
     for t in ("ffmpeg", "ffprobe"):
-        v = _ver([t, "-version"]) if shutil.which(t) else None
-        rows.append((t, v is not None, v or "MISSING (install ffmpeg)"))
-    yt = _ver([sys.executable, "-m", "yt_dlp", "--version"])
-    rows.append(("yt-dlp", yt is not None, yt or "MISSING (pip install yt-dlp)"))
+        v = _first_line([t, "-version"]) if shutil.which(t) else None
+        add(t, v, v or "MISSING (install ffmpeg)", True)
+    yt = _first_line([sys.executable, "-m", "yt_dlp", "--version"])
+    add("yt-dlp", yt, yt or "MISSING (pip install yt-dlp)", True)
     if shutil.which("ffmpeg"):
-        rows.append(("ffmpeg libass (captions)", media.has_filter("ass"), ""))
+        add("ffmpeg libass (captions)", media.has_filter("ass"), "" if media.has_filter("ass") else "captions disabled")
         n = media.nvenc_works()
-        rows.append(("NVENC encoder", n, "GPU encode" if n else "will use libx264 (CPU)"))
-    smi = _ver(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"]) if shutil.which("nvidia-smi") else None
-    rows.append(("NVIDIA GPU", smi is not None, smi or "not detected"))
+        add("NVENC encoder", n, "GPU encode available" if n else "not usable: will use libx264 (CPU)")
+    vram = media.vram_mib()
+    add("NVIDIA GPU", vram is not None, f"{vram} MiB VRAM" if vram else "not detected")
     cuda = media.cuda_available()
-    rows.append(("CUDA for Whisper", cuda, "yes" if cuda else "no (CPU fallback, slower)"))
-    for mod, pipname in (("faster_whisper", "faster-whisper"), ("cv2", "opencv-python-headless"),
-                         ("numpy", "numpy")):
+    add("CUDA for Whisper", cuda, "yes" if cuda else "no: CPU int8 'small' fallback")
+    claude = shutil.which("claude")
+    add("claude CLI (ranker)", claude, claude or "not found: install Claude Code or use ranker: gemini", False)
+    add("GEMINI_API_KEY (fallback ranker)", bool(os.environ.get("GEMINI_API_KEY")), "set" if os.environ.get("GEMINI_API_KEY") else "not set (optional)")
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        add("ANTHROPIC_API_KEY", False, "is set: ClipForge ignores it and strips it from the claude subprocess")
+    for mod, pip, crit in (("faster_whisper", "faster-whisper", True), ("scenedetect", "scenedetect", False),
+                           ("cv2", "opencv-python-headless", True), ("mediapipe", "mediapipe", False),
+                           ("numpy", "numpy", True), ("yaml", "pyyaml", True), ("typer", "typer", True),
+                           ("rich", "rich", True), ("jinja2", "jinja2", True)):
         ok = importlib.util.find_spec(mod) is not None
-        rows.append((pipname, ok, "" if ok else f"MISSING (pip install {pipname})"))
-    has_llm = importlib.util.find_spec("anthropic") is not None
-    key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    rows.append(("LLM rerank (optional)", has_llm and key,
-                 "enabled" if has_llm and key else "off: needs `pip install anthropic` + ANTHROPIC_API_KEY"))
+        add(pip, ok, "" if ok else f"MISSING (pip install {pip})" + ("" if crit else " [optional: Haar fallback]"), crit)
     return rows
 
 
 def print_env() -> bool:
     rows = check_env()
-    critical = {"ffmpeg", "ffprobe", "yt-dlp", "faster-whisper", "opencv-python-headless", "numpy"}
-    for name, ok, detail in rows:
-        print(f"[{'ok' if ok else '!!'}] {name:26s} {detail}")
-    return all(ok for name, ok, _ in rows if name in critical)
+    for name, ok, detail, _ in rows:
+        print(f"[{'ok' if ok else '!!'}] {name:34s} {detail}")
+    return all(ok for _, ok, _, crit in rows if crit)

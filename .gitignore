@@ -2,5 +2,7 @@ __pycache__/
 *.egg-info/
 .venv/
 .pytest_cache/
-clipforge_out/
+.env
+work/
+output/
 *.wav

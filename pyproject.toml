@@ -4,22 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clipforge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Automated stream/VOD to YouTube Shorts pipeline"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-  "numpy",
-  "opencv-python-headless>=4.8,<5",
-  "faster-whisper>=1.1",
   "yt-dlp",
+  "faster-whisper>=1.1",
+  "numpy",
+  "scenedetect[opencv-headless]>=0.6",
+  "opencv-python-headless>=4.8,<5",
+  "mediapipe",
+  "pyyaml",
+  "typer>=0.9",
+  "rich",
+  "jinja2",
 ]
 
 [project.optional-dependencies]
-llm = ["anthropic"]
 dev = ["pytest"]
 
 [project.scripts]
-clipforge = "clipforge.cli:main"
+clipforge = "clipforge.cli:app"
 
 [tool.setuptools]
 packages = ["clipforge"]
+
+[tool.setuptools.package-data]
+clipforge = ["assets/fonts/*"]
